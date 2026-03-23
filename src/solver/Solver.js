@@ -18,11 +18,21 @@ class Solver {
       minerPurityMultiplier: options.minerPurityMultiplier || 1,
       minerBaseRate: options.minerBaseRate || 60,
       overclock: options.overclock || 1,
-      enabledAlternates: options.enabledAlternates || []
+      activeRecipes: options.activeRecipes || []
     };
 
     const outputNodeId = this._addNode('Output', targetItemId, targetRate, 0, null);
     this._calculateNode(targetItemId, targetRate, outputNodeId, 0, []);
+
+    // Purgar el inventario sobrante puramente físico en verdaderos nodos de Descarte (AWESOME Sink)
+    Object.keys(this.inventory).forEach(key => {
+      this.inventory[key].forEach(stash => {
+        if (stash.amount > 0.0001) {
+          const dumpId = this._addNode('Descarte', key, stash.amount, 0, null);
+          this._addEdge(stash.sourceNode, dumpId, key, stash.amount);
+        }
+      });
+    });
 
     // --- CONSOLIDACIÓN DEL GRAFO (Post-procesamiento Modular) ---
     // Esta maravilla agrupa todos los nodos idénticos (Ej. 40 fundiciones repetidas separadas) en 1 solo súper módulo.
@@ -47,6 +57,7 @@ class Solver {
     const finalEdgesMap = {};
     const finalEdges = [];
     const targetHandleCounts = {}; // Rastreador de entradas múltiples
+    const sourceHandleCounts = {}; // Rastreador de salidas múltiples
 
     this.edges.forEach(edge => {
       const oldSource = this.nodes.find(n => n.id === edge.source);
@@ -62,11 +73,37 @@ class Solver {
         const handleIndex = targetHandleCounts[newTargetId];
         targetHandleCounts[newTargetId]++;
 
+        if (!sourceHandleCounts[newSourceId]) sourceHandleCounts[newSourceId] = 0;
+        const outHandleIndex = sourceHandleCounts[newSourceId];
+        sourceHandleCounts[newSourceId]++;
+
         const clonedEdge = JSON.parse(JSON.stringify(edge));
         clonedEdge.id = key;
         clonedEdge.source = newSourceId;
         clonedEdge.target = newTargetId;
         clonedEdge.targetHandle = `in-${handleIndex}`; // Asignar al pin magnético correspondiente
+        clonedEdge.sourceHandle = `out-${outHandleIndex}`;
+        
+        // Colorear de forma diferencial y precisa (Cinta vs Tubería de fluido)
+        const itemInfo = dataManager.getItem(edge._itemId) || {};
+        const isLiquid = itemInfo.liquid === true;
+
+        if (isLiquid) {
+          let r = 0, g = 188, b = 212; // Fallback cian
+          if (itemInfo.fluidColor) {
+            r = itemInfo.fluidColor.r; g = itemInfo.fluidColor.g; b = itemInfo.fluidColor.b;
+            // Iluminar fluidos oscuros (Ej: Petróleo rgb 0,0,0)
+            if (Math.max(r, g, b) < 50) { r += 120; g += 120; b += 120; }
+          }
+
+          clonedEdge.type = 'pipe'; 
+          clonedEdge.style = { stroke: `rgb(${r}, ${g}, ${b})` }; 
+        } else {
+          clonedEdge.type = 'belt'; 
+          clonedEdge.style = { stroke: '#FFA726' }; 
+          clonedEdge.markerEnd = { type: 'arrowclosed', color: '#FFA726' }; // Pequeña flecha extra estática apuntando a la máquina
+        }
+
         finalEdgesMap[key] = clonedEdge;
         finalEdges.push(clonedEdge);
       } else {
@@ -75,9 +112,12 @@ class Solver {
       }
     });
 
-    // Asignar el conteo de entradas total a la caja visual
+    // Asignar el conteo de entradas/salidas y calcular el Balance de Masa del Almacén
     finalNodes.forEach(n => {
       n.data.inputCount = targetHandleCounts[n.id] || 0;
+      n.data.outputCount = sourceHandleCounts[n.id] || 0;
+      
+      // Matemáticas de sumidero delegadas estáticamente a las puntas DAG
     });
 
     this.nodes = finalNodes;
@@ -92,23 +132,23 @@ class Solver {
     }
     const currentPath = [...pathArr, itemId];
 
-    // 1. Revisar Almacén Virtual (Subproductos Sobrantes)
-    if (this.inventory[itemId] && this.inventory[itemId] > 0) {
-      const available = this.inventory[itemId];
-      const consumed = Math.min(available, rateNeeded);
-      this.inventory[itemId] -= consumed;
-      rateNeeded -= consumed;
-      
-      const warehouseId = 'VirtualWarehouse';
-      if (!this.nodes.find(n => n.id === warehouseId)) {
-        this.nodes.push({
-          id: warehouseId, position: {x:0, y:0},
-          data: { label: 'Almacén Virtual', details: 'Subproductos', rate: 0, machines: 0 }
-        });
+    // 1. Tomar subproductos del inventario (Conexión Directa visual)
+    if (this.inventory[itemId] && this.inventory[itemId].length > 0) {
+      let needed = rateNeeded;
+      while (needed > 0.0001 && this.inventory[itemId].length > 0) {
+        let stash = this.inventory[itemId][0];
+        const consumedHere = Math.min(stash.amount, needed);
+        
+        // CONEXIÓN OMNIDIRECCIONAL: Dibuja flecha/tubería directo del Productor al Consumidor saltándose cajas falsas
+        this._addEdge(stash.sourceNode, parentNodeId, itemId, consumedHere);
+        
+        stash.amount -= consumedHere;
+        needed -= consumedHere;
+        
+        if (stash.amount <= 0.0001) this.inventory[itemId].shift(); // vaciar sumidero
       }
-      this._addEdge(warehouseId, parentNodeId, itemId, consumed);
-
-      if (rateNeeded <= 0) return; // Se cubrió la demanda completamente con el sobrante
+      rateNeeded = needed;
+      if (rateNeeded <= 0.0001) return; 
     }
 
     // Detener la búsqueda si es un recurso crudo natural (mineral, agua) para evitar transmutaciones cíclicas alienígenas
@@ -133,9 +173,41 @@ class Solver {
       return;
     }
 
-    // Priorizar recetas alternativas activadas
-    const activeAlternate = recipes.find(r => this.options.enabledAlternates.includes(r.className));
-    const defaultRecipe = activeAlternate || (recipes.find(r => !r.alternate) || recipes[0]);
+    // Algoritmo Avanzado Ant-Ciclos y Heurística de Empaquetados
+    const activePrefs = this.options.activeRecipes || [];
+    
+    // Filtro 1: Bloqueo de bucles. Ninguna receta puede requerir un ítem que ya estemos intentando fabricar en esta misma rama.
+    const safeRecipes = recipes.filter(r => {
+      if (!r.ingredients) return true;
+      return !r.ingredients.some(ing => pathArr.includes(ing.item) && !dataManager.isRawResource(ing.item));
+    });
+
+    if (safeRecipes.length === 0) {
+      // Rompe-bucle inquebrantable: Se extrae artificialmente de un nodo crudo.
+      const actualMinerRate = this.options.minerBaseRate * this.options.minerPurityMultiplier * this.options.overclock;
+      const minerNodeId = this._addNode('Miner', itemId, rateNeeded, rateNeeded / actualMinerRate, null);
+      this._addEdge(minerNodeId, parentNodeId, itemId, rateNeeded);
+      return;
+    }
+
+    // 1. Elegida por el usuario
+    let defaultRecipe = safeRecipes.find(r => activePrefs.includes(r.className));
+
+    if (!defaultRecipe) {
+      // 2. Es Producto Principal, y NO es un proceso de "Empaquetado" o "Desempaquetado" de fluidos infinitos
+      const primaryRecipes = safeRecipes.filter(r => 
+        r.products[0].item === itemId && 
+        !r.className.toLowerCase().includes('package')
+      );
+      
+      if (primaryRecipes.length > 0) {
+        defaultRecipe = primaryRecipes.find(r => !r.alternate) || primaryRecipes[0];
+      } else {
+        // 3. Fallback: Es un subproducto (Plástico generando Residuo Pesado) o solo quedan empaquetadoras
+        defaultRecipe = safeRecipes.find(r => !r.alternate) || safeRecipes[0];
+      }
+    }
+                       
     const product = defaultRecipe.products.find(p => p.item === itemId) || defaultRecipe.products[0];
     
     // Matemática con Overclock:
@@ -147,24 +219,16 @@ class Solver {
     const machineNodeId = this._addNode(buildingId, itemId, rateNeeded, machinesNeeded, defaultRecipe);
     this._addEdge(machineNodeId, parentNodeId, itemId, rateNeeded);
 
-    // 2. Almacenar los excedentes de otros productos (Subproductos)
+    // 2. Registrar subproductos PRIMERO (para que la máquina pueda autoabastecerse en su propia cadena)
     defaultRecipe.products.forEach(p => {
       if (p.item !== itemId) {
         const generatedExtra = p.amount * cyclesPerMinute;
-        this.inventory[p.item] = (this.inventory[p.item] || 0) + generatedExtra;
-        
-        const warehouseId = 'VirtualWarehouse';
-        if (!this.nodes.find(n => n.id === warehouseId)) {
-          this.nodes.push({
-            id: warehouseId, position: {x:0, y:0},
-            data: { label: 'Almacén Virtual', details: 'Subproductos', rate: 0, machines: 0 }
-          });
-        }
-        this._addEdge(machineNodeId, warehouseId, p.item, generatedExtra);
+        if (!this.inventory[p.item]) this.inventory[p.item] = [];
+        this.inventory[p.item].push({ sourceNode: machineNodeId, amount: generatedExtra });
       }
     });
 
-    // Recursión de ingredientes
+    // 3. Recursión de ingredientes
     if (defaultRecipe.ingredients) {
       defaultRecipe.ingredients.forEach(ing => {
         const inputRateNeeded = ing.amount * cyclesPerMinute;

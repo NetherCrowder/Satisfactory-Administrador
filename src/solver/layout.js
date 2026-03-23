@@ -15,14 +15,20 @@ export function getLayoutedElements(nodes, edges, direction = 'LR') {
     dagreGraph.setNode(node.id, { width: nodeWidth, height: nodeHeight });
   });
 
+  const nodeIds = new Set(nodes.map(n => n.id));
+
   edges.forEach((edge) => {
-    dagreGraph.setEdge(edge.source, edge.target);
+    // Solo agregar edges cuyos source y target existan como nodos
+    if (nodeIds.has(edge.source) && nodeIds.has(edge.target)) {
+      dagreGraph.setEdge(edge.source, edge.target);
+    }
   });
 
   dagre.layout(dagreGraph);
 
   const layoutedNodes = nodes.map((node) => {
     const nodeWithPosition = dagreGraph.node(node.id);
+    if (!nodeWithPosition) return { ...node, position: node.position || { x: 0, y: 0 } };
     return {
       ...node,
       targetPosition: 'right',
