@@ -1,10 +1,11 @@
 import dataManager from '../data/dataManager.js';
 
 class Solver {
-  constructor() {
+  constructor(externalInputs = {}) {
     this.nodes = [];
     this.edges = [];
     this.nodeCounter = 0;
+    this.externalInputs = externalInputs; // Mapa de itemId -> cantidad disponible/min
   }
 
   // Resuelve la cadena productiva hacia atrás
@@ -131,6 +132,27 @@ class Solver {
       throw new Error(`¡Bucle infinito detectado!\nRuta de ítems: ${pathArr.join(' -> ')} -> ${itemId}`);
     }
     const currentPath = [...pathArr, itemId];
+
+    // Verificar si este item está disponible como input externo
+    if (this.externalInputs[itemId] && this.externalInputs[itemId] > 0) {
+      const availableExternal = this.externalInputs[itemId];
+      const usedExternal = Math.min(availableExternal, rateNeeded);
+      
+      // Crear un nodo de input externo
+      const externalNodeId = this._addNode('Input Externo', itemId, usedExternal, 0, null);
+      this._addEdge(externalNodeId, parentNodeId, itemId, usedExternal);
+      
+      // Reducir la cantidad disponible externamente (para este cálculo)
+      this.externalInputs[itemId] -= usedExternal;
+      
+      // Si aún necesitamos más, continuar con la producción normal
+      const remainingNeeded = rateNeeded - usedExternal;
+      if (remainingNeeded <= 0.0001) {
+        return; // Completamente satisfecho por inputs externos
+      }
+      // Ajustar rateNeeded para la producción restante
+      rateNeeded = remainingNeeded;
+    }
 
     // 1. Tomar subproductos del inventario (Conexión Directa visual)
     if (this.inventory[itemId] && this.inventory[itemId].length > 0) {
@@ -279,4 +301,4 @@ class Solver {
   }
 }
 
-export default new Solver();
+export default Solver;

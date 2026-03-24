@@ -4,6 +4,7 @@ import 'reactflow/dist/style.css';
 import solver from '../solver/Solver';
 import { applyLogistics } from '../solver/LogisticsEngine';
 import { getLayoutedElements } from '../solver/layout';
+import { getAllRawResources, optimizeMultiObjectiveProduction } from '../solver/resourceCalculator';
 
 class ErrorBoundary extends Component {
   constructor(props) {
@@ -145,8 +146,9 @@ export default function Editor() {
   const [errorMsg, setErrorMsg] = useState('');
   const navigate = useNavigate();
 
-  const [targetItem, setTargetItem] = useState('Desc_Rotor_C');
-  const [targetRate, setTargetRate] = useState(10);
+  // Múltiples objetivos: array de {itemId, rate, isMaximizing}
+  const [targetObjectives, setTargetObjectives] = useState([{ itemId: 'Desc_Rotor_C', rate: 10, isMaximizing: false }]);
+  const [selectedObjectiveIdx, setSelectedObjectiveIdx] = useState(0);
   const [isConfigOpen, setIsConfigOpen] = useState(false);
   const [isAlternatesOpen, setIsAlternatesOpen] = useState(false);
   const [showSummary, setShowSummary] = useState(false);
@@ -159,8 +161,37 @@ export default function Editor() {
   const [beltTier, setBeltTier] = useState(6);
   const [pipeTier, setPipeTier] = useState(2);
 
+  // Recursos disponibles globales: {resourceId: availableRate}
+  const [availableResources, setAvailableResources] = useState({});
+  const [showResourceManager, setShowResourceManager] = useState(false);
+
+  // Inputs externos: {itemId: availableRate}
+  const [externalInputs, setExternalInputs] = useState({});
+  const [showExternalInputs, setShowExternalInputs] = useState(false);
+  const [externalInputsSearchQuery, setExternalInputsSearchQuery] = useState('');
+
+  // Inicializar recursos disponibles con 0 para todos los recursos crudos
+  const initializeAvailableResources = () => {
+    const rawResources = getAllRawResources();
+    const initialized = { ...availableResources };
+    rawResources.forEach(resource => {
+      if (initialized[resource.name] === undefined) {
+        initialized[resource.name] = 0;
+      }
+    });
+    setAvailableResources(initialized);
+  };
+
+  // Inicializar recursos cuando se abre el modal por primera vez
+  useEffect(() => {
+    if (showResourceManager && Object.keys(availableResources).length === 0) {
+      initializeAvailableResources();
+    }
+  }, [showResourceManager]);
+
   const allItems = useMemo(() => dataManager.getAllItems().sort((a,b) => a.name.localeCompare(b.name)), []);
   const filteredItems = useMemo(() => allItems.filter(item => item.name.toLowerCase().includes(searchQuery.toLowerCase())), [allItems, searchQuery]);
+  const filteredExternalItems = useMemo(() => allItems.filter(item => item.name.toLowerCase().includes(externalInputsSearchQuery.toLowerCase())), [allItems, externalInputsSearchQuery]);
   
   const recipesByProduct = useMemo(() => {
     const groups = {};
@@ -178,23 +209,102 @@ export default function Editor() {
     return recipesByProduct.filter(([itemName]) => itemName.toLowerCase().includes(altSearchQuery.toLowerCase()));
   }, [recipesByProduct, altSearchQuery]);
 
-  const calculateGraph = (itemLabel, rate, opts = null) => {
+  const handleOptimizeAllObjectives = () => {
+    try {
+      setErrorMsg('Optimizando producción...');
+      const options = { overclock: overclock/100, minerPurityMultiplier: minerPurity, minerBaseRate: minerMark, activeRecipes };
+
+      const result = optimizeMultiObjectiveProduction(targetObjectives, availableResources, externalInputs, options);
+
+      setTargetObjectives(result.optimizedObjectives);
+
+      // Mostrar mensaje de optimización
+      const limitingMessages = Object.values(result.limitingFactors);
+      const externalUsedMessages = Object.entries(result.externalInputsUsed).map(([itemId, used]) => {
+        const item = dataManager.getItem(itemId);
+        return `${item?.name || itemId}: ${used.toFixed(1)}/min usado`;
+      });
+
+      let message = '';
+      if (limitingMessages.length > 0) {
+        message += `Optimización completada. Factores limitantes: ${limitingMessages.join('; ')}`;
+      } else {
+        message += 'Optimización completada - producción maximizada dentro de límites disponibles.';
+      }
+
+      if (externalUsedMessages.length > 0) {
+        message += ` Inputs externos utilizados: ${externalUsedMessages.join(', ')}`;
+      }
+
+      setErrorMsg(message);
+      
+      // Auto-recalcular con las nuevas tasas
+      calculateGraph(result.optimizedObjectives, options);
+    } catch (e) {
+      setErrorMsg('Error al optimizar: ' + e.toString());
+    }
+  };
+
+  const calculateGraph = (objectives, opts = null) => {
     try {
       setErrorMsg('');
       const options = opts || { overclock: overclock/100, minerPurityMultiplier: minerPurity, minerBaseRate: minerMark, activeRecipes };
-      const rawGraph = solver.solve(itemLabel, Number(rate), options);
       
-      const logicGraph = applyLogistics(rawGraph.nodes, rawGraph.edges, { beltTier, pipeTier });
+      // Si no hay objetivos, mostrar error
+      if (!objectives || objectives.length === 0) {
+        setErrorMsg('Por favor, agrega al menos un objetivo.');
+        return;
+      }
 
+      // Combinar todos los grafos de cada objetivo
+      let allNodes = [];
+      let allEdges = [];
+      const nodeIdMapping = {}; // Para evitar duplicados de nodos de salida
+      let nodeCounter = 0;
+
+      objectives.forEach((objective, idx) => {
+        const solverInstance = new solver(externalInputs);
+        const rawGraph = solverInstance.solve(objective.itemId, Number(objective.rate), options);
+        
+        // Renombrar IDs de nodos para evitar conflictos
+        const nodeMap = {};
+        rawGraph.nodes.forEach(node => {
+          nodeCounter++;
+          const newId = `node_${idx}_${node.id}`;
+          nodeMap[node.id] = newId;
+          allNodes.push({ ...node, id: newId });
+        });
+
+        // Renombrar IDs de edges
+        rawGraph.edges.forEach(edge => {
+          const newEdge = { 
+            ...edge, 
+            id: `e_${idx}_${edge.id}`,
+            source: nodeMap[edge.source],
+            target: nodeMap[edge.target]
+          };
+          allEdges.push(newEdge);
+        });
+      });
+
+      // Aplicar logística a todos los nodos/edges combinados
+      const logicGraph = applyLogistics(allNodes, allEdges, { beltTier, pipeTier });
+
+      // Layout
       const formattedNodes = logicGraph.nodes.map(n => ({ ...n, type: 'custom' }));
       const layoutedGraph = getLayoutedElements(formattedNodes, logicGraph.edges, 'LR');
-      setNodes(layoutedGraph.nodes); setEdges(layoutedGraph.edges);
-    } catch (e) { setErrorMsg(e.toString()); }
+      setNodes(layoutedGraph.nodes);
+      setEdges(layoutedGraph.edges);
+    } catch (e) { 
+      setErrorMsg(e.toString()); 
+    }
   };
 
-  useEffect(() => { calculateGraph(targetItem, targetRate); }, []);
-  const handleApplyConfig = () => { calculateGraph(targetItem, targetRate, { overclock: overclock/100, minerPurityMultiplier: minerPurity, minerBaseRate: minerMark, activeRecipes }); setIsConfigOpen(false); };
-  const currentItemName = dataManager.getItem(targetItem)?.name || 'Desconocido';
+  useEffect(() => { calculateGraph(targetObjectives); }, []);
+  const handleApplyConfig = () => { calculateGraph(targetObjectives, { overclock: overclock/100, minerPurityMultiplier: minerPurity, minerBaseRate: minerMark, activeRecipes }); setIsConfigOpen(false); };
+  
+  const currentObjective = targetObjectives[selectedObjectiveIdx];
+  const currentItemName = dataManager.getItem(currentObjective?.itemId)?.name || 'Desconocido';
 
   return (
     <div style={{ width: '100vw', height: '100vh', background: '#0d0d0f', display: 'flex', flexDirection: 'column' }}>
@@ -205,6 +315,8 @@ export default function Editor() {
         </div>
         <div style={{ display: 'flex', gap: '10px' }}>
           <button onClick={() => setIsAlternatesOpen(true)} style={{ background: '#252528', color: '#ffc107', border: '1px solid #444', padding: '8px 15px', borderRadius: '6px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}>Gestor de Recetas</button>
+          <button onClick={() => setShowResourceManager(true)} style={{ background: '#252528', color: '#4CAF50', border: '1px solid #444', padding: '8px 15px', borderRadius: '6px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}>📊 Recursos Disponibles</button>
+          <button onClick={() => setShowExternalInputs(true)} style={{ background: '#252528', color: '#FF9800', border: '1px solid #444', padding: '8px 15px', borderRadius: '6px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}>📦 Importar Productos</button>
           <button onClick={() => setShowSummary(!showSummary)} style={{ background: showSummary ? '#333' : '#252528', color: '#fff', border: '1px solid #444', padding: '8px 15px', borderRadius: '6px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}><ClipboardList size={16} /> Ver Resumen</button>
           <button onClick={() => setIsConfigOpen(true)} style={{ background: '#252528', color: '#fff', border: '1px solid #444', padding: '8px 15px', borderRadius: '6px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}><Settings size={16} /> Configurar Receta</button>
         </div>
@@ -321,26 +433,172 @@ export default function Editor() {
             </div>
             
             <div style={{ padding: '25px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+              {/* Lista de Objetivos */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                <label style={{ color: '#aaa', fontSize: '14px' }}>Ítem Objetivo:</label>
-                <div style={{ position: 'relative' }}>
-                  <Search size={16} color="#666" style={{ position: 'absolute', left: '10px', top: '10px' }} />
-                  <input type="text" placeholder="Buscar ítem..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} style={{ width: '100%', boxSizing: 'border-box', background: '#252528', border: '1px solid #444', padding: '10px 10px 10px 35px', borderRadius: '6px', color: '#fff', outline: 'none' }} />
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <label style={{ color: '#aaa', fontSize: '14px', fontWeight: 'bold' }}>Objetivos de Producción:</label>
+                  <button 
+                    onClick={() => { setTargetObjectives([...targetObjectives, { itemId: '', rate: 1, isMaximizing: false }]); setSelectedObjectiveIdx(targetObjectives.length); }}
+                    style={{ background: '#007acc', color: 'white', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', fontWeight: 'bold' }}
+                  >+ Agregar</button>
                 </div>
-                <div style={{ background: '#0d0d0f', border: '1px solid #333', borderRadius: '6px', height: '140px', overflowY: 'auto', marginTop: '5px' }}>
-                  {filteredItems.map(item => (
-                    <div key={item.className} onClick={() => setTargetItem(item.className)} style={{ padding: '10px 15px', color: targetItem === item.className ? '#fff' : '#ccc', background: targetItem === item.className ? '#007acc' : 'transparent', cursor: 'pointer', borderBottom: '1px solid #1a1a20', fontSize: '14px' }}>
-                      {item.name}
-                    </div>
-                  ))}
-                  {filteredItems.length === 0 && <div style={{ padding: '15px', color: '#666', textAlign: 'center' }}>No se encontraron resultados</div>}
+                
+                {/* Cards de Objetivos */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', background: '#0d0d0f', borderRadius: '8px', padding: '12px', border: '1px solid #2a2a30', maxHeight: '200px', overflowY: 'auto' }}>
+                  {targetObjectives.length === 0 ? (
+                    <div style={{ color: '#666', fontSize: '13px', padding: '10px' }}>No hay objetivos. Agrega uno arriba.</div>
+                  ) : (
+                    targetObjectives.map((obj, idx) => {
+                      const itemName = dataManager.getItem(obj.itemId)?.name || 'Sin seleccionar';
+                      return (
+                        <div 
+                          key={idx}
+                          onClick={() => setSelectedObjectiveIdx(idx)}
+                          style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            padding: '10px 12px',
+                            background: selectedObjectiveIdx === idx ? '#007acc' : '#1c1c22',
+                            border: `1px solid ${selectedObjectiveIdx === idx ? '#0099ff' : '#333'}`,
+                            borderRadius: '6px',
+                            cursor: 'pointer',
+                            transition: 'all 0.2s'
+                          }}
+                        >
+                          <span style={{ color: selectedObjectiveIdx === idx ? '#fff' : '#aaa', fontSize: '13px' }}>
+                            <strong>{itemName}</strong> ({obj.rate}/min)
+                          </span>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setTargetObjectives(targetObjectives.filter((_, i) => i !== idx));
+                              if (selectedObjectiveIdx >= targetObjectives.length - 1) {
+                                setSelectedObjectiveIdx(Math.max(0, selectedObjectiveIdx - 1));
+                              }
+                            }}
+                            style={{
+                              background: 'transparent',
+                              color: '#ff5555',
+                              border: '1px solid #ff5555',
+                              padding: '4px 8px',
+                              borderRadius: '4px',
+                              cursor: 'pointer',
+                              fontSize: '11px',
+                              fontWeight: 'bold'
+                            }}
+                          >✕</button>
+                        </div>
+                      );
+                    })
+                  )}
                 </div>
               </div>
 
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                <label style={{ color: '#aaa', fontSize: '14px' }}>Producción deseada (ítems/min):</label>
-                <input type="number" value={targetRate} onChange={(e) => setTargetRate(e.target.value)} min="0.1" step="0.1" style={{ width: '100%', boxSizing: 'border-box', background: '#252528', border: '1px solid #444', padding: '10px', borderRadius: '6px', color: '#fff', fontSize: '16px', outline: 'none' }} />
-              </div>
+              {/* Editor del Objetivo Seleccionado */}
+              {currentObjective && (
+                <>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    <label style={{ color: '#aaa', fontSize: '14px' }}>Seleccionar Ítem:</label>
+                    <div style={{ position: 'relative' }}>
+                      <Search size={16} color="#666" style={{ position: 'absolute', left: '10px', top: '10px' }} />
+                      <input 
+                        type="text" 
+                        placeholder="Buscar ítem..." 
+                        value={searchQuery} 
+                        onChange={(e) => setSearchQuery(e.target.value)} 
+                        style={{ width: '100%', boxSizing: 'border-box', background: '#252528', border: '1px solid #444', padding: '10px 10px 10px 35px', borderRadius: '6px', color: '#fff', outline: 'none' }} 
+                      />
+                    </div>
+                    <div style={{ background: '#0d0d0f', border: '1px solid #333', borderRadius: '6px', height: '140px', overflowY: 'auto', marginTop: '5px' }}>
+                      {filteredItems.map(item => (
+                        <div 
+                          key={item.className} 
+                          onClick={() => {
+                            const newObjs = [...targetObjectives];
+                            newObjs[selectedObjectiveIdx].itemId = item.className;
+                            setTargetObjectives(newObjs);
+                          }} 
+                          style={{ 
+                            padding: '10px 15px', 
+                            color: currentObjective.itemId === item.className ? '#fff' : '#ccc', 
+                            background: currentObjective.itemId === item.className ? '#007acc' : 'transparent', 
+                            cursor: 'pointer', 
+                            borderBottom: '1px solid #1a1a20', 
+                            fontSize: '14px' 
+                          }}
+                        >
+                          {item.name}
+                        </div>
+                      ))}
+                      {filteredItems.length === 0 && <div style={{ padding: '15px', color: '#666', textAlign: 'center' }}>No se encontraron resultados</div>}
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    <label style={{ color: '#aaa', fontSize: '14px' }}>Producción deseada (ítems/min):</label>
+                    <input 
+                      type="number" 
+                      value={currentObjective.rate} 
+                      onChange={(e) => {
+                        const newObjs = [...targetObjectives];
+                        newObjs[selectedObjectiveIdx].rate = e.target.value;
+                        setTargetObjectives(newObjs);
+                      }} 
+                      min="0.1" 
+                      step="0.1" 
+                      style={{ width: '100%', boxSizing: 'border-box', background: '#252528', border: '1px solid #444', padding: '10px', borderRadius: '6px', color: '#fff', fontSize: '16px', outline: 'none' }} 
+                    />
+                  </div>
+
+                  {/* Checkbox de Maximización */}
+                  <div style={{ background: '#1c1c22', border: '1px solid #333', borderRadius: '8px', padding: '15px', display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <input 
+                      type="checkbox" 
+                      checked={currentObjective.isMaximizing || false}
+                      onChange={(e) => {
+                        const newObjs = [...targetObjectives];
+                        newObjs[selectedObjectiveIdx].isMaximizing = e.target.checked;
+                        setTargetObjectives(newObjs);
+                      }}
+                      style={{ accentColor: '#007acc', width: '18px', height: '18px', cursor: 'pointer' }}
+                    />
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                      <label style={{ color: '#aaa', fontSize: '13px', cursor: 'pointer', fontWeight: 'bold' }}>Maximizar Producción</label>
+                      <span style={{ color: '#666', fontSize: '11px' }}>
+                        Calcula la tasa máxima posible respetando los recursos disponibles configurados
+                      </span>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {/* Botón Global de Optimización */}
+              {targetObjectives.some(obj => obj.isMaximizing) && (
+                <div style={{ background: '#2a2a35', border: '1px solid #4CAF50', borderRadius: '8px', padding: '15px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    <div style={{ color: '#4CAF50', fontSize: '14px', fontWeight: 'bold' }}>🚀 Optimización Disponible</div>
+                    <div style={{ color: '#ccc', fontSize: '12px' }}>
+                      {targetObjectives.filter(obj => obj.isMaximizing).length} objetivo(s) con maximización activada
+                    </div>
+                  </div>
+                  <button 
+                    onClick={handleOptimizeAllObjectives}
+                    style={{
+                      background: '#4CAF50',
+                      color: 'white',
+                      border: 'none',
+                      padding: '10px 20px',
+                      borderRadius: '6px',
+                      cursor: 'pointer',
+                      fontWeight: 'bold',
+                      fontSize: '13px'
+                    }}
+                  >
+                    📈 Optimizar Todo
+                  </button>
+                </div>
+              )}
 
               <div style={{ display: 'flex', gap: '15px', padding: '15px', background: '#1c1c22', borderRadius: '8px', border: '1px solid #333' }}>
                 <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '8px' }}>
@@ -466,7 +724,269 @@ export default function Editor() {
             </div>
 
             <div style={{ padding: '20px', borderTop: '1px solid #333', display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
-              <button onClick={() => { calculateGraph(targetItem, targetRate); setIsAlternatesOpen(false); }} style={{ background: '#007acc', color: 'white', border: 'none', padding: '10px 20px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>Guardar y Recalcular</button>
+              <button onClick={() => { calculateGraph(targetObjectives); setIsAlternatesOpen(false); }} style={{ background: '#007acc', color: 'white', border: 'none', padding: '10px 20px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>Guardar y Recalcular</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showResourceManager && (
+        <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)', zIndex: 100, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+          <div style={{ background: '#1a1a20', border: '1px solid #333', borderRadius: '12px', width: '700px', maxHeight: '90vh', display: 'flex', flexDirection: 'column', boxShadow: '0 10px 40px rgba(0,0,0,0.5)' }}>
+            <div style={{ padding: '20px', borderBottom: '1px solid #333', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h2 style={{ margin: 0, color: '#fff', fontSize: '20px' }}>📊 Recursos Disponibles</h2>
+              <X size={24} color="#aaa" style={{ cursor: 'pointer' }} onClick={() => setShowResourceManager(false)} />
+            </div>
+            
+            <div style={{ padding: '20px', overflowY: 'auto', flex: 1, display: 'flex', flexDirection: 'column', gap: '15px' }}>
+              <p style={{ color: '#888', fontSize: '14px', margin: 0 }}>
+                Define la cantidad máxima de recursos crudos disponibles para tu fábrica. 
+                Los objetivos con "Maximizar Producción" usarán estos límites para calcular la producción óptima.
+              </p>
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '15px' }}>
+                {getAllRawResources().map(resource => {
+                  const currentValue = availableResources[resource.name] || 0;
+                  const isLiquid = resource.isLiquid;
+                  const isGas = resource.isGas;
+
+                  return (
+                    <div key={resource.id} style={{ background: '#1c1c22', border: '1px solid #333', borderRadius: '8px', padding: '15px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span style={{ 
+                          color: isLiquid ? '#4FC3F7' : isGas ? '#81C784' : '#FFA726', 
+                          fontSize: '16px' 
+                        }}>
+                          {isLiquid ? '💧' : isGas ? '💨' : '⛰️'}
+                        </span>
+                        <span style={{ color: '#fff', fontSize: '14px', fontWeight: 'bold' }}>{resource.name}</span>
+                      </div>
+                      
+                      <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                        <input 
+                          type="number" 
+                          placeholder="0" 
+                          value={currentValue} 
+                          onChange={(e) => {
+                            const newResources = { ...availableResources };
+                            const value = e.target.value;
+                            if (value && !isNaN(Number(value)) && Number(value) > 0) {
+                              newResources[resource.name] = Number(value);
+                            } else {
+                              newResources[resource.name] = 0;
+                            }
+                            setAvailableResources(newResources);
+                          }}
+                          min="0"
+                          step="1"
+                          style={{ 
+                            flex: 1, 
+                            background: '#111', 
+                            border: '1px solid #444', 
+                            color: isLiquid ? '#4FC3F7' : isGas ? '#81C784' : '#FFA726', 
+                            padding: '8px', 
+                            borderRadius: '4px', 
+                            fontSize: '13px', 
+                            outline: 'none' 
+                          }}
+                        />
+                        <span style={{ color: '#666', fontSize: '12px', minWidth: '35px' }}>/min</span>
+                      </div>
+                      
+                      {currentValue > 0 && (
+                        <div style={{ fontSize: '11px', color: '#888' }}>
+                          {currentValue} unidades/minuto disponibles
+                        </div>
+                      )}
+                      {currentValue === 0 && (
+                        <div style={{ fontSize: '11px', color: '#ff5555' }}>
+                          Sin recursos disponibles
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div style={{ background: '#2a2a35', borderRadius: '8px', padding: '15px', border: '1px solid #444' }}>
+                <h4 style={{ margin: '0 0 10px 0', color: '#9cdcfe', fontSize: '14px' }}>💡 Consejos de Uso:</h4>
+                <ul style={{ margin: 0, paddingLeft: '20px', color: '#ccc', fontSize: '12px', lineHeight: '1.4' }}>
+                  <li>Deja vacío o pon 0 para recursos no disponibles</li>
+                  <li>Los valores representan unidades/minuto que puedes extraer</li>
+                  <li>Los objetivos con "Maximizar Producción" respetarán estos límites</li>
+                  <li>Puedes actualizar estos valores en cualquier momento</li>
+                </ul>
+              </div>
+            </div>
+
+            <div style={{ padding: '20px', borderTop: '1px solid #333', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ fontSize: '12px', color: '#666' }}>
+                {Object.values(availableResources).filter(v => v > 0).length} recursos con límites configurados
+              </div>
+              <div style={{ display: 'flex', gap: '10px' }}>
+                <button onClick={() => {
+                  const rawResources = getAllRawResources();
+                  const cleared = {};
+                  rawResources.forEach(resource => {
+                    cleared[resource.name] = 0;
+                  });
+                  setAvailableResources(cleared);
+                }} style={{ background: 'transparent', color: '#ff5555', border: '1px solid #ff5555', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', fontSize: '13px' }}>Poner Todo en 0</button>
+                <button onClick={() => setShowResourceManager(false)} style={{ background: '#007acc', color: 'white', border: 'none', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', fontSize: '13px', fontWeight: 'bold' }}>Guardar</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Inputs Externos */}
+      {showExternalInputs && (
+        <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: 'rgba(0,0,0,0.8)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 1000 }}>
+          <div style={{ background: '#1a1a1a', border: '1px solid #333', borderRadius: '12px', width: '90vw', maxWidth: '1000px', height: '80vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+            <div style={{ padding: '20px', borderBottom: '1px solid #333', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h2 style={{ margin: 0, color: '#FF9800', fontSize: '20px' }}>📦 Importar Productos</h2>
+              <X size={24} color="#aaa" style={{ cursor: 'pointer' }} onClick={() => setShowExternalInputs(false)} />
+            </div>
+            
+            <div style={{ padding: '20px', overflowY: 'auto', flex: 1, display: 'flex', flexDirection: 'column', gap: '15px' }}>
+              <p style={{ color: '#888', fontSize: '14px', margin: 0 }}>
+                Especifica items que ya produces en otras fábricas y que puedes usar en este plano.
+                <strong style={{ color: '#FF9800' }}>Nota:</strong> Los inputs externos solo afectan la producción del item objetivo seleccionado.
+                Si produces componentes (como tornillos) en otras fábricas, configúralos como "Recursos Disponibles" en lugar de inputs externos.
+              </p>
+
+              {/* Buscador de items */}
+              <div style={{ background: '#1c1c22', border: '1px solid #333', borderRadius: '8px', padding: '15px' }}>
+                <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginBottom: '15px' }}>
+                  <Search size={18} color="#666" />
+                  <input 
+                    type="text" 
+                    placeholder="Buscar item..." 
+                    value={externalInputsSearchQuery}
+                    onChange={(e) => setExternalInputsSearchQuery(e.target.value)}
+                    style={{ flex: 1, background: '#111', border: '1px solid #444', color: '#fff', padding: '8px 12px', borderRadius: '6px', outline: 'none' }}
+                  />
+                </div>
+                
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '10px', maxHeight: '300px', overflowY: 'auto' }}>
+                  {filteredExternalItems.slice(0, 50).map(item => {
+                    const currentValue = externalInputs[item.className] || 0;
+                    const isSelected = currentValue > 0;
+                    
+                    return (
+                      <div 
+                        key={item.className}
+                        onClick={() => {
+                          const newInputs = { ...externalInputs };
+                          if (isSelected) {
+                            delete newInputs[item.className];
+                          } else {
+                            newInputs[item.className] = 1; // Valor por defecto
+                          }
+                          setExternalInputs(newInputs);
+                        }}
+                        style={{ 
+                          background: isSelected ? '#2a2a35' : '#1c1c22', 
+                          border: `1px solid ${isSelected ? '#FF9800' : '#333'}`, 
+                          borderRadius: '6px', 
+                          padding: '10px', 
+                          cursor: 'pointer',
+                          transition: 'all 0.2s',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '5px'
+                        }}
+                      >
+                        <div style={{ color: '#fff', fontSize: '13px', fontWeight: 'bold' }}>{item.name}</div>
+                        {isSelected && (
+                          <input 
+                            type="number" 
+                            value={currentValue} 
+                            onChange={(e) => {
+                              e.stopPropagation();
+                              const newInputs = { ...externalInputs };
+                              const value = Number(e.target.value);
+                              if (value > 0) {
+                                newInputs[item.className] = value;
+                              } else {
+                                delete newInputs[item.className];
+                              }
+                              setExternalInputs(newInputs);
+                            }}
+                            min="0.1"
+                            step="0.1"
+                            style={{ 
+                              width: '100%', 
+                              background: '#111', 
+                              border: '1px solid #444', 
+                              color: '#FF9800', 
+                              padding: '4px 6px', 
+                              borderRadius: '4px', 
+                              fontSize: '12px', 
+                              outline: 'none' 
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                          />
+                        )}
+                        {isSelected && (
+                          <div style={{ fontSize: '10px', color: '#888' }}>/min disponible</div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Items seleccionados */}
+              {Object.keys(externalInputs).length > 0 && (
+                <div style={{ background: '#2a2a35', border: '1px solid #444', borderRadius: '8px', padding: '15px' }}>
+                  <h4 style={{ margin: '0 0 10px 0', color: '#FF9800', fontSize: '14px' }}>📦 Inputs Configurados:</h4>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '8px' }}>
+                    {Object.entries(externalInputs).map(([itemId, rate]) => {
+                      const item = dataManager.getItem(itemId);
+                      return (
+                        <div key={itemId} style={{ background: '#1c1c22', border: '1px solid #FF9800', borderRadius: '6px', padding: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <div>
+                            <div style={{ color: '#fff', fontSize: '12px', fontWeight: 'bold' }}>{item?.name || itemId}</div>
+                            <div style={{ color: '#FF9800', fontSize: '11px' }}>{rate}/min</div>
+                          </div>
+                          <X 
+                            size={14} 
+                            color="#ff5555" 
+                            style={{ cursor: 'pointer' }} 
+                            onClick={() => {
+                              const newInputs = { ...externalInputs };
+                              delete newInputs[itemId];
+                              setExternalInputs(newInputs);
+                            }}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              <div style={{ background: '#2a2a35', borderRadius: '8px', padding: '15px', border: '1px solid #444' }}>
+                <h4 style={{ margin: '0 0 10px 0', color: '#9cdcfe', fontSize: '14px' }}>💡 Consejos de Uso:</h4>
+                <ul style={{ margin: 0, paddingLeft: '20px', color: '#ccc', fontSize: '12px', lineHeight: '1.4' }}>
+                  <li><strong>Inputs Externos:</strong> Para items que produces en otras fábricas y quieres usar directamente (ej: ya tienes 10 rotores de otra línea)</li>
+                  <li><strong>Recursos Disponibles:</strong> Para componentes o recursos crudos que produces externamente (ej: tornillos, mineral de hierro)</li>
+                  <li>Haz click en un item para agregarlo como input externo</li>
+                  <li>Especifica la cantidad que produces en otras fábricas</li>
+                  <li>El sistema calculará si necesitas producir más o si tienes suficiente</li>
+                </ul>
+              </div>
+            </div>
+
+            <div style={{ padding: '20px', borderTop: '1px solid #333', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ fontSize: '12px', color: '#666' }}>
+                {Object.keys(externalInputs).length} inputs externos configurados
+              </div>
+              <div style={{ display: 'flex', gap: '10px' }}>
+                <button onClick={() => setExternalInputs({})} style={{ background: 'transparent', color: '#ff5555', border: '1px solid #ff5555', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', fontSize: '13px' }}>Limpiar Todo</button>
+                <button onClick={() => setShowExternalInputs(false)} style={{ background: '#007acc', color: 'white', border: 'none', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', fontSize: '13px', fontWeight: 'bold' }}>Guardar</button>
+              </div>
             </div>
           </div>
         </div>

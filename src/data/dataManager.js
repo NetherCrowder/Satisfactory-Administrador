@@ -1,4 +1,4 @@
-import gameData from './data-ficsmas.json';
+import gameData from './data-ficsmas.json' with { type: 'json' };
 
 class DataManager {
   constructor() {
