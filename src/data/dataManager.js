@@ -7,16 +7,17 @@ class DataManager {
 
   // --- Items ---
   getAllItems() {
-    return Object.values(this.data.items || {});
+    return Object.entries(this.data.items || {}).map(([id, item]) => ({ id, ...item }));
   }
 
   getItem(itemId) {
-    return this.data.items[itemId];
+    const item = this.data.items[itemId];
+    return item ? { id: itemId, ...item } : undefined;
   }
 
   // --- Recetas ---
   getAllRecipes() {
-    return Object.values(this.data.recipes || {});
+    return Object.entries(this.data.recipes || {}).map(([id, recipe]) => ({ id, ...recipe }));
   }
 
   getRecipe(recipeId) {
@@ -39,16 +40,31 @@ class DataManager {
 
   // --- Edificios de Producción ---
   getAllBuildings() {
-    return Object.values(this.data.buildings || {});
+    return Object.entries(this.data.buildings || {}).map(([id, building]) => ({ id, ...building }));
   }
 
   getBuilding(buildingId) {
-    return this.data.buildings[buildingId];
+    const building = this.data.buildings[buildingId];
+    return building ? { id: buildingId, ...building } : undefined;
   }
 
   // --- Recursos Crudos (Minerales, Agua, etc.) ---
   isRawResource(itemId) {
     return this.data.resources && this.data.resources[itemId] !== undefined;
+  }
+
+  // --- Recetas Básicas y Alternativas ---
+  getBasicRecipes() {
+    return this.getAllRecipes().filter(recipe => recipe.inMachine === true && recipe.alternate === false && recipe.forBuilding !== true);
+  }
+
+  getAlternativeRecipes() {
+    return this.getAllRecipes().filter(recipe => recipe.inMachine === true && recipe.alternate === true && recipe.forBuilding !== true);
+  }
+
+  // --- Filtrar recetas producidas en máquinas ---
+  isMachineProduced(recipe) {
+    return recipe.inMachine === true;
   }
 }
 

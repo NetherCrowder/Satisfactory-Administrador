@@ -18,11 +18,18 @@ class Solver {
       minerPurityMultiplier: options.minerPurityMultiplier || 1,
       minerBaseRate: options.minerBaseRate || 60,
       overclock: options.overclock || 1,
-      activeRecipes: options.activeRecipes || []
+      activeRecipes: options.activeRecipes || [],
+      importedItems: new Set(options.importedItems || [])
     };
 
-    const outputNodeId = this._addNode('Output', targetItemId, targetRate, 0, null);
-    this._calculateNode(targetItemId, targetRate, outputNodeId, 0, []);
+    const targets = Array.isArray(targetItemId)
+      ? targetItemId.map(target => ({ itemId: target.itemId, rate: target.rate }))
+      : [{ itemId: targetItemId, rate: targetRate }];
+
+    targets.forEach(target => {
+      const outputNodeId = this._addNode('Output', target.itemId, target.rate, 0, null);
+      this._calculateNode(target.itemId, target.rate, outputNodeId, 0, []);
+    });
 
     // Purgar el inventario sobrante puramente físico en verdaderos nodos de Descarte (AWESOME Sink)
     Object.keys(this.inventory).forEach(key => {
@@ -151,6 +158,12 @@ class Solver {
       if (rateNeeded <= 0.0001) return; 
     }
 
+    if (this.options.importedItems.has(itemId)) {
+      const importNodeId = this._addNode('Import', itemId, rateNeeded, 0, null);
+      this._addEdge(importNodeId, parentNodeId, itemId, rateNeeded);
+      return;
+    }
+
     // Detener la búsqueda si es un recurso crudo natural (mineral, agua) para evitar transmutaciones cíclicas alienígenas
     if (dataManager.isRawResource(itemId)) {
       const actualMinerRate = this.options.minerBaseRate * this.options.minerPurityMultiplier * this.options.overclock;
@@ -190,22 +203,28 @@ class Solver {
       return;
     }
 
-    // 1. Elegida por el usuario
-    let defaultRecipe = safeRecipes.find(r => activePrefs.includes(r.className));
+    // Preferencia del usuario: recetas seleccionadas explícitamente por id.
+    const preferredRecipes = safeRecipes.filter(r => activePrefs.includes(r.id));
+    const candidateRecipes = preferredRecipes.length > 0 ? preferredRecipes : safeRecipes;
+
+    const scoreRecipe = (recipe) => {
+      const product = recipe.products.find(p => p.item === itemId) || recipe.products[0];
+      const cyclesPerMinute = rateNeeded / product.amount;
+      const recipeCyclesPerMinute = 60 / recipe.time;
+      const machines = cyclesPerMinute / (recipeCyclesPerMinute * this.options.overclock);
+      const ingredientPenalty = (recipe.ingredients?.length || 0) * 0.04;
+      const subproductBonus = (recipe.products?.filter(p => p.item !== itemId).length || 0) * 0.08;
+      const alternatePenalty = recipe.alternate ? 0.05 : 0;
+      return machines + ingredientPenalty + alternatePenalty - subproductBonus;
+    };
+
+    let defaultRecipe = candidateRecipes.reduce((best, recipe) => {
+      if (!best) return recipe;
+      return scoreRecipe(recipe) < scoreRecipe(best) ? recipe : best;
+    }, null);
 
     if (!defaultRecipe) {
-      // 2. Es Producto Principal, y NO es un proceso de "Empaquetado" o "Desempaquetado" de fluidos infinitos
-      const primaryRecipes = safeRecipes.filter(r => 
-        r.products[0].item === itemId && 
-        !r.className.toLowerCase().includes('package')
-      );
-      
-      if (primaryRecipes.length > 0) {
-        defaultRecipe = primaryRecipes.find(r => !r.alternate) || primaryRecipes[0];
-      } else {
-        // 3. Fallback: Es un subproducto (Plástico generando Residuo Pesado) o solo quedan empaquetadoras
-        defaultRecipe = safeRecipes.find(r => !r.alternate) || safeRecipes[0];
-      }
+      defaultRecipe = safeRecipes[0];
     }
                        
     const product = defaultRecipe.products.find(p => p.item === itemId) || defaultRecipe.products[0];
@@ -245,6 +264,7 @@ class Solver {
     let buildingName = type;
     if (type === 'Output') buildingName = 'Cofre de Salida';
     else if (type === 'Miner') buildingName = 'Extracción Cruda';
+    else if (type === 'Import') buildingName = 'Importación';
     else if (dataManager.getBuilding(type)) buildingName = dataManager.getBuilding(type).name;
 
     const itemName = itemInfo ? itemInfo.name : itemId;
