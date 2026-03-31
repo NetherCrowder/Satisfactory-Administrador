@@ -29,7 +29,7 @@ class ErrorBoundary extends Component {
   }
 }
 import dataManager from '../data/dataManager';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft, Save, Settings, X, Search, ClipboardList } from 'lucide-react';
 
 const CustomNode = ({ data, isConnectable }) => {
@@ -140,23 +140,63 @@ const PipeEdge = ({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targ
 
 const edgeTypes = { belt: BeltEdge, pipe: PipeEdge };
 
+<<<<<<< Updated upstream
+=======
+const rawResourceNames = [
+  'Bauxite',
+  'Caterium ore',
+  'Coal',
+  'Copper ore',
+  'Crude oil',
+  'Iron ore',
+  'Limestone',
+  'Nitrogen gas',
+  'Raw quartz',
+  'SAM',
+  'Sulfur',
+  'Uranium',
+  'Water'
+];
+
+const demoSelectedProducts = [
+  { itemId: 'Desc_ModularFrameFused_C', productionMode: 'items/min', quantity: 5 },
+  { itemId: 'Desc_MotorLightweight_C', productionMode: 'items/min', quantity: 5 }
+];
+const demoImportedProducts = [];
+const demoRawMaterials = rawResourceNames.map(name => ({ itemName: name, quantity: 10000, enabled: true }));
+const demoActiveRecipes = dataManager.getBasicRecipes().map(recipe => recipe.id);
+
+>>>>>>> Stashed changes
 export default function Editor() {
   const [nodes, setNodes] = useState([]);
   const [edges, setEdges] = useState([]);
   const [errorMsg, setErrorMsg] = useState('');
   const navigate = useNavigate();
 
+<<<<<<< Updated upstream
   // Múltiples objetivos: array de {itemId, rate, isMaximizing}
   const [targetObjectives, setTargetObjectives] = useState([{ itemId: 'Desc_Rotor_C', rate: 10, isMaximizing: false }]);
   const [selectedObjectiveIdx, setSelectedObjectiveIdx] = useState(0);
   const [isConfigOpen, setIsConfigOpen] = useState(false);
   const [isAlternatesOpen, setIsAlternatesOpen] = useState(false);
   const [showSummary, setShowSummary] = useState(false);
+=======
+  const params = useParams();
+  const isDemo = params.id === 'demo';
+
+  const [targetItem, setTargetItem] = useState('Desc_Rotor_C');
+  const [targetRate, setTargetRate] = useState(10);
+  const [isConfigOpen, setIsConfigOpen] = useState(false);
+  const [isAlternatesOpen, setIsAlternatesOpen] = useState(false);
+  const [showSummary, setShowSummary] = useState(false);
+  const [showGraph, setShowGraph] = useState(isDemo);
+>>>>>>> Stashed changes
   const [searchQuery, setSearchQuery] = useState('');
   const [altSearchQuery, setAltSearchQuery] = useState('');
   const [overclock, setOverclock] = useState(100);
   const [minerPurity, setMinerPurity] = useState(1);
   const [minerMark, setMinerMark] = useState(60);
+<<<<<<< Updated upstream
   const [activeRecipes, setActiveRecipes] = useState([]);
   const [beltTier, setBeltTier] = useState(6);
   const [pipeTier, setPipeTier] = useState(2);
@@ -188,6 +228,15 @@ export default function Editor() {
       initializeAvailableResources();
     }
   }, [showResourceManager]);
+=======
+  const [activeRecipes, setActiveRecipes] = useState(() => isDemo ? demoActiveRecipes : dataManager.getBasicRecipes().map(recipe => recipe.id));
+  const [beltTier, setBeltTier] = useState(6);
+  const [pipeTier, setPipeTier] = useState(2);
+  const [selectedProducts, setSelectedProducts] = useState(() => isDemo ? demoSelectedProducts : []);
+  const [rawMaterials, setRawMaterials] = useState(() => isDemo ? demoRawMaterials : rawResourceNames.map(name => ({ itemName: name, quantity: 0, enabled: true })));
+  const [importedProducts, setImportedProducts] = useState(() => isDemo ? demoImportedProducts : []);
+  const [availableMachines, setAvailableMachines] = useState([]);
+>>>>>>> Stashed changes
 
   const allItems = useMemo(() => dataManager.getAllItems().sort((a,b) => a.name.localeCompare(b.name)), []);
   const filteredItems = useMemo(() => allItems.filter(item => item.name.toLowerCase().includes(searchQuery.toLowerCase())), [allItems, searchQuery]);
@@ -248,7 +297,34 @@ export default function Editor() {
   const calculateGraph = (objectives, opts = null) => {
     try {
       setErrorMsg('');
+<<<<<<< Updated upstream
       const options = opts || { overclock: overclock/100, minerPurityMultiplier: minerPurity, minerBaseRate: minerMark, activeRecipes };
+=======
+      const rawSupply = rawMaterials.reduce((acc, raw) => {
+        if (!raw.enabled || !raw.itemName) return acc;
+        const itemId = getItemIdByName(raw.itemName);
+        if (itemId) acc[itemId] = raw.quantity;
+        return acc;
+      }, {});
+
+      const importedSupply = importedProducts.reduce((acc, product) => {
+        if (!product.itemName) return acc;
+        const itemId = getItemIdByName(product.itemName);
+        if (itemId) acc[itemId] = product.quantity;
+        return acc;
+      }, {});
+
+      const options = {
+        overclock: overclock / 100,
+        minerPurityMultiplier: minerPurity,
+        minerBaseRate: minerMark,
+        activeRecipes,
+        rawSupply,
+        importedSupply,
+        ...opts
+      };
+      const rawGraph = solver.solve(graphTargets, null, options);
+>>>>>>> Stashed changes
       
       // Si no hay objetivos, mostrar error
       if (!objectives || objectives.length === 0) {
@@ -292,13 +368,83 @@ export default function Editor() {
 
       // Layout
       const formattedNodes = logicGraph.nodes.map(n => ({ ...n, type: 'custom' }));
+<<<<<<< Updated upstream
       const layoutedGraph = getLayoutedElements(formattedNodes, logicGraph.edges, 'LR');
       setNodes(layoutedGraph.nodes);
       setEdges(layoutedGraph.edges);
     } catch (e) { 
       setErrorMsg(e.toString()); 
+=======
+      const layoutedGraph = getLayoutedElements(formattedNodes, logicGraph.edges, 'TB');
+      setNodes(layoutedGraph.nodes); setEdges(layoutedGraph.edges);
+    } catch (e) { setErrorMsg(e.toString()); }
+  };
+
+  useEffect(() => { calculateGraph(); }, []);
+  useEffect(() => {
+    if (isDemo) {
+      setSelectedProducts(demoSelectedProducts);
+      setRawMaterials(demoRawMaterials);
+      setImportedProducts(demoImportedProducts);
+      setActiveRecipes(demoActiveRecipes);
+      setShowGraph(true);
+    } else {
+      setSelectedProducts([]);
+      setRawMaterials(rawResourceNames.map(name => ({ itemName: name, quantity: 0, enabled: true })));
+      setImportedProducts([]);
+      setActiveRecipes(dataManager.getBasicRecipes().map(recipe => recipe.id));
+      setShowGraph(false);
+    }
+  }, [isDemo]);
+  useEffect(() => {
+    if (showGraph) {
+      calculateGraph();
+>>>>>>> Stashed changes
     }
   };
+<<<<<<< Updated upstream
+=======
+  const currentItemName = isDemo ? 'Ejemplo: Fused Modular Frame + Turbo Motor' : dataManager.getItem(targetItem)?.name || 'Desconocido';
+
+  if (isDemo) {
+    return (
+      <div style={{ width: '100vw', height: '100vh', background: '#0d0d0f', display: 'flex', flexDirection: 'column' }}>
+        <div style={{ height: '60px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 20px', background: 'rgba(20,20,25,0.95)', borderBottom: '1px solid #333', zIndex: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+            <button onClick={() => navigate('/')} style={{ background: 'transparent', border: '1px solid #444', color: '#fff', padding: '8px', borderRadius: '8px', cursor: 'pointer' }}><ArrowLeft size={18} /></button>
+            <div>
+              <div style={{ color: '#fff', fontWeight: 600, fontSize: '18px' }}>Fábrica de Ejemplo</div>
+              <div style={{ color: '#94a3b8', fontSize: '13px' }}>Fused Modular Frame + Turbo Motor · solo recetas básicas</div>
+            </div>
+          </div>
+        </div>
+        <div style={{ flex: 1, padding: '20px' }}>
+          <div style={{ marginBottom: '18px', color: '#cbd5e1', fontSize: '14px' }}>
+            Este ejemplo no se puede modificar. El gráfico se genera directamente desde la configuración de demo.
+          </div>
+          <div style={{ width: '100%', height: 'calc(100% - 42px)', background: '#0f1720', borderRadius: '18px', border: '1px solid #334155', overflow: 'hidden' }}>
+            <ErrorBoundary>
+              <ReactFlow
+                nodes={nodes}
+                edges={edges}
+                nodeTypes={nodeTypes}
+                edgeTypes={edgeTypes}
+                fitView
+                fitViewOptions={{ padding: 0.2 }}
+                style={{ width: '100%', height: '100%' }}
+              >
+                <Background gap={24} size={1} color="#1f2937" />
+                <Controls showInteractive={false} />
+                <MiniMap nodeStrokeColor="#64748b" nodeColor="#1f2937" zoomable={false} />
+              </ReactFlow>
+            </ErrorBoundary>
+          </div>
+          {errorMsg && <div style={{ marginTop: '14px', color: '#f87171' }}>{errorMsg}</div>}
+        </div>
+      </div>
+    );
+  }
+>>>>>>> Stashed changes
 
   useEffect(() => { calculateGraph(targetObjectives); }, []);
   const handleApplyConfig = () => { calculateGraph(targetObjectives, { overclock: overclock/100, minerPurityMultiplier: minerPurity, minerBaseRate: minerMark, activeRecipes }); setIsConfigOpen(false); };

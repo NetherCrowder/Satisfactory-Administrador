@@ -29,10 +29,11 @@ export function getLayoutedElements(nodes, edges, direction = 'LR') {
   const layoutedNodes = nodes.map((node) => {
     const nodeWithPosition = dagreGraph.node(node.id);
     if (!nodeWithPosition) return { ...node, position: node.position || { x: 0, y: 0 } };
+    const isVertical = direction === 'TB' || direction === 'BT';
     return {
       ...node,
-      targetPosition: 'right',
-      sourcePosition: 'left',
+      targetPosition: isVertical ? 'top' : 'right',
+      sourcePosition: isVertical ? 'bottom' : 'left',
       position: {
         x: nodeWithPosition.x - nodeWidth / 2,
         y: nodeWithPosition.y - nodeHeight / 2,

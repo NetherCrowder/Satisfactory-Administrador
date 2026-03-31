@@ -19,11 +19,31 @@ class Solver {
       minerPurityMultiplier: options.minerPurityMultiplier || 1,
       minerBaseRate: options.minerBaseRate || 60,
       overclock: options.overclock || 1,
+<<<<<<< Updated upstream
       activeRecipes: options.activeRecipes || []
     };
 
     const outputNodeId = this._addNode('Output', targetItemId, targetRate, 0, null);
     this._calculateNode(targetItemId, targetRate, outputNodeId, 0, []);
+=======
+      activeRecipes: options.activeRecipes || [],
+      rawSupply: { ...(options.rawSupply || {}) },
+      importedSupply: { ...(options.importedSupply || {}) },
+      importedItems: new Set(Object.keys(options.importedSupply || {}))
+    };
+
+    this.rawSupply = { ...this.options.rawSupply };
+    this.importedSupply = { ...this.options.importedSupply };
+
+    const targets = Array.isArray(targetItemId)
+      ? targetItemId.map(target => ({ itemId: target.itemId, rate: target.rate }))
+      : [{ itemId: targetItemId, rate: targetRate }];
+
+    targets.forEach(target => {
+      const outputNodeId = this._addNode('Output', target.itemId, target.rate, 0, null);
+      this._calculateNode(target.itemId, target.rate, outputNodeId, 0, []);
+    });
+>>>>>>> Stashed changes
 
     // Purgar el inventario sobrante puramente físico en verdaderos nodos de Descarte (AWESOME Sink)
     Object.keys(this.inventory).forEach(key => {
@@ -173,8 +193,26 @@ class Solver {
       if (rateNeeded <= 0.0001) return; 
     }
 
+<<<<<<< Updated upstream
+=======
+    if (this.importedSupply[itemId] !== undefined && this.importedSupply[itemId] > 0) {
+      const available = this.importedSupply[itemId];
+      const usedImport = Math.min(available, rateNeeded);
+      this.importedSupply[itemId] -= usedImport;
+      const importNodeId = this._addNode('Import', itemId, usedImport, 0, null);
+      this._addEdge(importNodeId, parentNodeId, itemId, usedImport);
+      rateNeeded -= usedImport;
+      if (rateNeeded <= 0.0001) return;
+    }
+
+>>>>>>> Stashed changes
     // Detener la búsqueda si es un recurso crudo natural (mineral, agua) para evitar transmutaciones cíclicas alienígenas
     if (dataManager.isRawResource(itemId)) {
+      const available = this.rawSupply[itemId] || 0;
+      if (rateNeeded > available + 0.0001) {
+        throw new Error(`No hay suficientes materias primas de ${dataManager.getItem(itemId)?.name || itemId}. Se requieren ${rateNeeded.toFixed(2)} / min, pero solo hay ${available.toFixed(2)}.`);
+      }
+      this.rawSupply[itemId] = available - rateNeeded;
       const actualMinerRate = this.options.minerBaseRate * this.options.minerPurityMultiplier * this.options.overclock;
       const machinesNeeded = rateNeeded / actualMinerRate;
       
@@ -212,8 +250,42 @@ class Solver {
       return;
     }
 
+<<<<<<< Updated upstream
     // 1. Elegida por el usuario
     let defaultRecipe = safeRecipes.find(r => activePrefs.includes(r.className));
+=======
+    // Preferencia del usuario: recetas seleccionadas explícitamente por id.
+    const preferredRecipes = safeRecipes.filter(r => activePrefs.includes(r.id));
+    if (preferredRecipes.length === 0) {
+      console.error('DEBUG no preferred recipes', {
+        itemId,
+        itemName: dataManager.getItem(itemId)?.name,
+        activePrefs: activePrefs.length,
+        recipes: recipes.map(r => r.id),
+        safeRecipes: safeRecipes.map(r => r.id),
+        preferredRecipes: preferredRecipes.map(r => r.id),
+        pathArr
+      });
+      throw new Error(`No hay recetas seleccionadas para producir ${dataManager.getItem(itemId)?.name || itemId}.`);
+    }
+    const candidateRecipes = preferredRecipes;
+
+    const scoreRecipe = (recipe) => {
+      const product = recipe.products.find(p => p.item === itemId) || recipe.products[0];
+      const cyclesPerMinute = rateNeeded / product.amount;
+      const recipeCyclesPerMinute = 60 / recipe.time;
+      const machines = cyclesPerMinute / (recipeCyclesPerMinute * this.options.overclock);
+      const ingredientPenalty = (recipe.ingredients?.length || 0) * 0.04;
+      const subproductBonus = (recipe.products?.filter(p => p.item !== itemId).length || 0) * 0.08;
+      const alternatePenalty = recipe.alternate ? 0.05 : 0;
+      return machines + ingredientPenalty + alternatePenalty - subproductBonus;
+    };
+
+    let defaultRecipe = candidateRecipes.reduce((best, recipe) => {
+      if (!best) return recipe;
+      return scoreRecipe(recipe) < scoreRecipe(best) ? recipe : best;
+    }, null);
+>>>>>>> Stashed changes
 
     if (!defaultRecipe) {
       // 2. Es Producto Principal, y NO es un proceso de "Empaquetado" o "Desempaquetado" de fluidos infinitos

@@ -48,8 +48,8 @@ export default function Dashboard() {
             </span>
           </div>
           <div style={{ marginTop: '10px' }}>
-            <h3 style={{ margin: '0 0 5px 0', fontSize: '20px', color: '#fff' }}>Fábrica de Rotores</h3>
-            <p style={{ margin: 0, color: '#aaa', fontSize: '14px' }}>Objetivo principal: 10 Rotores/min</p>
+            <h3 style={{ margin: '0 0 5px 0', fontSize: '20px', color: '#fff' }}>Fábrica de Ejemplo</h3>
+            <p style={{ margin: 0, color: '#aaa', fontSize: '14px' }}>Fused Modular Frame + Turbo Motor · solo recetas básicas</p>
           </div>
         </div>
 
